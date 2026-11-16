@@ -2,10 +2,16 @@ import {
     CATEGORY_IDS, FITNESS_SETS, PRIORITY_MAX, WEEKDAYS,
     emptyRow, emptyDay, toTemplate, displayHours, hourLabel, buildLayout, computeStats,
     toKey, parseKey, addDays, slotStart, planEvents, eventTitle, eventBody, dueAlerts, buildIcs, fitnessTotal,
+    migrateTimestamps, toSyncPayload, mergeStates,
 } from './core.js';
+import { findGist, createGist, readGist, writeGist } from './sync.js';
 
 const STORE_KEY = 'planner.v1';
 const TICK_KEY = 'planner.lastTick';
+// 토큰은 백업 파일에 섞이지 않도록 별도 키에 둔다
+const SYNC_KEY = 'planner.sync';
+const SYNC_PUSH_DELAY_MS = 1500;
+const SYNC_POLL_MS = 60_000;
 const SAVE_DELAY_MS = 250;
 const TICK_INTERVAL_MS = 15_000;
 const MAX_CATCHUP_MS = 10 * 60_000;
@@ -41,9 +47,10 @@ function defaultState() {
             startHour: DEFAULT_START_HOUR,
             notify: { enabled: false, lead: 0 },
         },
-        habits: habits.map((name) => ({ id: uid(), name })),
-        exercises: exercises.map(([name, unit]) => ({ id: uid(), name, unit })),
+        habits: habits.map((name, i) => ({ id: `h${i + 1}`, name })),
+        exercises: exercises.map(([name, unit], i) => ({ id: `e${i + 1}`, name, unit })),
         template: null,
+        metaUpdatedAt: 0,
         days: {},
     };
 }
@@ -53,11 +60,11 @@ function loadState() {
     try {
         const saved = JSON.parse(localStorage.getItem(STORE_KEY));
         if (!saved) return base;
-        return {
+        return migrateTimestamps({
             ...base,
             ...saved,
             settings: { ...base.settings, ...saved.settings, notify: { ...base.settings.notify, ...saved.settings?.notify } },
-        };
+        });
     } catch {
         return base;
     }
@@ -69,7 +76,15 @@ let editHabits = false;
 let editFitness = false;
 let saveTimer = null;
 
-function save() {
+/**
+ * scope — 무엇이 바뀌었는지 동기화에 알린다
+ * - 'day': 보고 있는 날의 기록 (기본)
+ * - 'meta': 습관·운동 목록, 플래너 이름, 시작 시각, 기본 계획
+ * - 'none': 이 기기에만 해당 (알림 설정, 편집 모드 전환)
+ */
+function save(scope = 'day') {
+    if (scope === 'day') day().updatedAt = Date.now();
+    if (scope === 'meta') state.metaUpdatedAt = Date.now();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
         try {
@@ -78,6 +93,7 @@ function save() {
             toast('저장 공간이 부족해 저장하지 못했어요');
         }
     }, SAVE_DELAY_MS);
+    if (scope !== 'none') schedulePush();
 }
 
 function day(key = currentKey) {
@@ -453,7 +469,7 @@ $('#fitness').addEventListener('input', (e) => {
     } else if (t.dataset.exUnit) {
         state.exercises[Number(t.dataset.exUnit)].unit = t.value;
     }
-    save();
+    save(t.dataset.ex || t.dataset.meta ? 'day' : 'meta');
 });
 
 $('#fitness').addEventListener('click', (e) => {
@@ -461,12 +477,13 @@ $('#fitness').addEventListener('click', (e) => {
         editFitness = !editFitness;
     } else if (e.target.closest('[data-ex-add]')) {
         state.exercises.push({ id: uid(), name: '', unit: UNITS[0] });
+        save('meta');
     } else if (e.target.closest('[data-ex-del]')) {
         state.exercises.splice(Number(e.target.closest('[data-ex-del]').dataset.exDel), 1);
+        save('meta');
     } else {
         return;
     }
-    save();
     renderFitness();
     if (editFitness) $('#fitness .edit-row:last-of-type input')?.focus();
 });
@@ -474,7 +491,7 @@ $('#fitness').addEventListener('click', (e) => {
 $('#habits').addEventListener('input', (e) => {
     if (!e.target.dataset.habitName) return;
     state.habits[Number(e.target.dataset.habitName)].name = e.target.value;
-    save();
+    save('meta');
 });
 
 $('#habits').addEventListener('click', (e) => {
@@ -482,16 +499,18 @@ $('#habits').addEventListener('click', (e) => {
     if (habit) {
         const done = day().habitsDone;
         done[habit.dataset.habit] = !done[habit.dataset.habit];
+        save();
     } else if (e.target.closest('[data-toggle]')) {
         editHabits = !editHabits;
     } else if (e.target.closest('[data-habit-add]')) {
         state.habits.push({ id: uid(), name: '' });
+        save('meta');
     } else if (e.target.closest('[data-habit-del]')) {
         state.habits.splice(Number(e.target.closest('[data-habit-del]').dataset.habitDel), 1);
+        save('meta');
     } else {
         return;
     }
-    save();
     renderHabits();
     if (editHabits && e.target.closest('[data-habit-add]')) $('#habits .edit-row:last-of-type input')?.focus();
 });
@@ -608,7 +627,7 @@ async function enableNotifications() {
     }
     const permission = await Notification.requestPermission();
     state.settings.notify.enabled = permission === 'granted';
-    save();
+    save('none');
     if (permission === 'granted') {
         showNotification('알림이 켜졌어요', '계획한 시간이 되면 알려드릴게요', 'enabled');
     } else {
@@ -663,6 +682,185 @@ async function importBackup(file) {
     }
 }
 
+// ---------- 기기 간 동기화 (GitHub Gist) ----------
+
+let pushTimer = null;
+let syncing = null;
+let syncAgain = false;
+let syncError = '';
+
+function readSyncConfig() {
+    try {
+        return JSON.parse(localStorage.getItem(SYNC_KEY)) || null;
+    } catch {
+        return null;
+    }
+}
+
+function writeSyncConfig(config) {
+    try {
+        if (config) localStorage.setItem(SYNC_KEY, JSON.stringify(config));
+        else localStorage.removeItem(SYNC_KEY);
+    } catch {
+        toast('동기화 설정을 저장하지 못했어요');
+    }
+}
+
+function schedulePush() {
+    if (!readSyncConfig()) return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => syncNow(), SYNC_PUSH_DELAY_MS);
+}
+
+function persistNow() {
+    clearTimeout(saveTimer);
+    try {
+        localStorage.setItem(STORE_KEY, JSON.stringify(state));
+    } catch {
+        toast('저장 공간이 부족해 저장하지 못했어요');
+    }
+}
+
+function isTyping() {
+    return document.activeElement?.matches('input, textarea, select');
+}
+
+// 원격에 로컬보다 새로운 것이 있었는가
+function remoteBroughtChanges(before, merged) {
+    return (merged.metaUpdatedAt ?? 0) > (before.metaUpdatedAt ?? 0)
+        || Object.keys(merged.days).some((key) => merged.days[key] !== before.days[key]);
+}
+
+// 로컬에 원격보다 새로운 것이 있는가
+function needsPush(payload, remote) {
+    if (!remote) return true;
+    if (payload.metaUpdatedAt > (remote.metaUpdatedAt ?? 0)) return true;
+    return Object.entries(payload.days).some(([key, d]) => d.updatedAt !== remote.days?.[key]?.updatedAt);
+}
+
+function syncStatusText() {
+    const config = readSyncConfig();
+    if (!config) return '꺼짐';
+    if (syncing) return '동기화 중…';
+    if (syncError) return '오류';
+    if (!config.lastSync) return '연결됨';
+    const t = new Date(config.lastSync);
+    return `${t.getHours()}:${String(t.getMinutes()).padStart(2, '0')} 동기화됨`;
+}
+
+function updateSyncStatus() {
+    const pill = document.getElementById('syncStatus');
+    if (!pill) return;
+    pill.textContent = syncStatusText();
+    pill.classList.toggle('on', Boolean(readSyncConfig()) && !syncError);
+    const err = document.getElementById('syncError');
+    if (err) err.textContent = syncError;
+}
+
+async function syncNow({ manual = false } = {}) {
+    const config = readSyncConfig();
+    if (!config) return;
+    if (syncing) {
+        syncAgain = true;
+        return;
+    }
+    clearTimeout(pushTimer);
+    syncing = (async () => {
+        try {
+            const remote = await readGist(config.token, config.gistId);
+            const before = state;
+            const merged = mergeStates(state, remote);
+            state = merged;
+            persistNow();
+            if (remoteBroughtChanges(before, merged)) {
+                if (isTyping()) {
+                    renderHeader();
+                    renderBoard();
+                } else {
+                    render();
+                }
+            }
+            const payload = toSyncPayload(merged);
+            if (needsPush(payload, remote)) await writeGist(config.token, config.gistId, payload);
+            writeSyncConfig({ ...config, lastSync: Date.now() });
+            syncError = '';
+            if (manual) toast('동기화했어요');
+        } catch (err) {
+            const first = !syncError;
+            syncError = err.message;
+            if (manual || (first && err.status)) toast(err.message);
+        }
+    })();
+    updateSyncStatus();
+    await syncing;
+    syncing = null;
+    updateSyncStatus();
+    if (syncAgain) {
+        syncAgain = false;
+        syncNow();
+    }
+}
+
+async function connectSync() {
+    const token = $('#settingsForm [name=syncToken]')?.value.trim();
+    if (!token) {
+        toast('토큰을 붙여넣어 주세요');
+        return;
+    }
+    const btn = $('#settingsForm [data-set=sync-connect]');
+    btn.disabled = true;
+    btn.textContent = '연결 중…';
+    try {
+        const gistId = await findGist(token);
+        if (gistId) {
+            writeSyncConfig({ token, gistId });
+            await syncNow();
+            toast('다른 기기의 기록과 합쳤어요');
+        } else {
+            const created = await createGist(token, toSyncPayload(state));
+            writeSyncConfig({ token, gistId: created, lastSync: Date.now() });
+            toast('동기화를 시작했어요. 다른 기기에서도 같은 토큰으로 연결하세요');
+        }
+        syncError = '';
+    } catch (err) {
+        toast(err.message);
+    }
+    buildSettingsForm();
+}
+
+async function copySyncToken() {
+    const config = readSyncConfig();
+    try {
+        await navigator.clipboard.writeText(config.token);
+        toast('토큰을 복사했어요. 다른 기기의 동기화 칸에 붙여넣으세요');
+    } catch {
+        toast('복사하지 못했어요');
+    }
+}
+
+function syncSectionHtml() {
+    const config = readSyncConfig();
+    const head = `<p class="section-title">🔄 기기 간 동기화 <span class="status-pill" id="syncStatus"></span></p>`;
+    if (!config) {
+        return `${head}
+        <p class="hint">GitHub 비공개 Gist에 저장해서 폰과 맥이 같은 기록을 보게 해요.
+        <b>기록이 많은 기기에서 먼저</b> 연결하세요.<br>
+        1. <a href="https://github.com/settings/tokens/new?scopes=gist&amp;description=4X%20Planner%20sync" target="_blank" rel="noopener">GitHub 토큰 만들기</a> — <b>gist</b> 권한만 체크 → Generate token<br>
+        2. 만든 토큰을 아래에 붙여넣고 <b>연결</b><br>
+        3. 다른 기기에서도 같은 토큰으로 연결</p>
+        <div class="field"><input type="password" name="syncToken" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ghp_… 토큰 붙여넣기" aria-label="GitHub 토큰"></div>
+        <button type="button" class="btn ok" data-set="sync-connect">연결</button>`;
+    }
+    return `${head}
+        <p class="hint">앱을 열 때, 수정할 때, 그리고 1분마다 자동으로 동기화해요. 같은 날을 두 기기에서 동시에 고치면 <b>나중에 고친 쪽</b>이 남아요.
+        <span id="syncError" style="color:#d0453a"></span></p>
+        <div class="btn-row">
+            <button type="button" class="btn" data-set="sync-now">지금 동기화</button>
+            <button type="button" class="btn" data-set="sync-copy">토큰 복사</button>
+            <button type="button" class="btn danger" data-set="sync-disconnect">연결 끊기</button>
+        </div>`;
+}
+
 // ---------- 설정 시트 ----------
 
 function notifyStatus() {
@@ -680,6 +878,8 @@ function buildSettingsForm() {
     const granted = notifySupported() && Notification.permission === 'granted';
     $('#settingsForm').innerHTML = `
         <div class="sheet-head"><h2>설정</h2><span class="grow"></span><button type="submit" class="btn small primary" value="close">닫기</button></div>
+
+        ${syncSectionHtml()}
 
         <div class="field"><span class="label">플래너 이름</span><input type="text" name="title" value="${esc(s.title)}"></div>
         <div class="field">
@@ -726,6 +926,7 @@ function buildSettingsForm() {
             <input type="file" accept="application/json,.json" class="visually-hidden" name="restoreFile" tabindex="-1">
         </div>
         <button type="button" class="btn danger" data-set="reset-day">이 날 기록 모두 지우기</button>`;
+    updateSyncStatus();
 }
 
 function copyRowsFrom(sourceRows) {
@@ -739,11 +940,20 @@ $('#settingsBtn').addEventListener('click', () => {
 
 $('#settingsForm').addEventListener('change', (e) => {
     const t = e.target;
-    if (t.name === 'title') state.settings.title = t.value.trim() || defaultState().settings.title;
-    if (t.name === 'startHour') state.settings.startHour = Number(t.value);
-    if (t.name === 'lead') state.settings.notify.lead = Number(t.value);
-    if (t.name === 'restoreFile' && t.files[0]) importBackup(t.files[0]);
-    save();
+    if (t.name === 'title') {
+        state.settings.title = t.value.trim() || defaultState().settings.title;
+        save('meta');
+    } else if (t.name === 'startHour') {
+        state.settings.startHour = Number(t.value);
+        save('meta');
+    } else if (t.name === 'lead') {
+        state.settings.notify.lead = Number(t.value);
+        save('none');
+    } else if (t.name === 'restoreFile' && t.files[0]) {
+        importBackup(t.files[0]);
+    } else {
+        return;
+    }
     render();
 });
 
@@ -751,6 +961,7 @@ $('#settingsForm').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-set]');
     if (!btn) return;
     const action = btn.dataset.set;
+    let scope = 'day';
     const replaceDay = (msg) => {
         const hasData = day().rows.some((r) => r.action || r.plan || r.cat);
         return !hasData || window.confirm(msg);
@@ -761,6 +972,7 @@ $('#settingsForm').addEventListener('click', (e) => {
         return;
     case 'notify-off':
         state.settings.notify.enabled = false;
+        scope = 'none';
         break;
     case 'notify-test':
         showNotification('테스트 알림', `${hourLabel(new Date().getHours())} · 알림이 잘 오고 있어요`, 'test');
@@ -774,6 +986,7 @@ $('#settingsForm').addEventListener('click', (e) => {
     case 'tpl-save':
         state.template = toTemplate(day().rows);
         toast('기본 계획으로 저장했어요');
+        scope = 'meta';
         break;
     case 'tpl-apply':
         if (!replaceDay('이 날 시간표를 기본 계획으로 덮어쓸까요?')) return;
@@ -781,6 +994,7 @@ $('#settingsForm').addEventListener('click', (e) => {
         break;
     case 'tpl-clear':
         state.template = null;
+        scope = 'meta';
         break;
     case 'copy-prev': {
         const prev = state.days[addDays(currentKey, -1)];
@@ -801,12 +1015,26 @@ $('#settingsForm').addEventListener('click', (e) => {
         return;
     case 'reset-day':
         if (!window.confirm('이 날의 시간표·습관·운동·노트를 모두 지울까요?')) return;
-        delete state.days[currentKey];
+        state.days[currentKey] = emptyDay();
         break;
+    case 'sync-connect':
+        connectSync();
+        return;
+    case 'sync-copy':
+        copySyncToken();
+        return;
+    case 'sync-now':
+        syncNow({ manual: true });
+        return;
+    case 'sync-disconnect':
+        if (!window.confirm('이 기기의 동기화를 끊을까요? (기록은 이 기기와 Gist 양쪽에 그대로 남아요)')) return;
+        writeSyncConfig(null);
+        buildSettingsForm();
+        return;
     default:
         return;
     }
-    save();
+    save(scope);
     render();
     buildSettingsForm();
 });
@@ -824,9 +1052,20 @@ document.addEventListener('visibilitychange', () => {
     if (render.openedOn && render.openedOn !== today && currentKey === render.openedOn) goTo(today);
     render.openedOn = today;
     tick();
+    syncNow();
 });
+
+// 앱을 내릴 때 보내지 못한 변경을 바로 올린다
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && pushTimer) syncNow();
+});
+window.addEventListener('online', () => syncNow());
+setInterval(() => {
+    if (document.visibilityState === 'visible') syncNow();
+}, SYNC_POLL_MS);
 
 render.openedOn = currentKey;
 render();
 tick();
+syncNow();
 setInterval(tick, TICK_INTERVAL_MS);

@@ -1,8 +1,8 @@
 // 앱 셸 캐시 + 알림 클릭 처리. 파일을 바꾸면 VERSION 을 올린다
-const VERSION = 'v1';
+const VERSION = 'v2';
 const CACHE = `planner-${VERSION}`;
 const SHELL = [
-    './', 'index.html', 'styles.css', 'app.js', 'core.js', 'manifest.webmanifest',
+    './', 'index.html', 'styles.css', 'app.js', 'core.js', 'sync.js', 'manifest.webmanifest',
     'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-180.png',
 ];
 
@@ -21,6 +21,9 @@ self.addEventListener('activate', (event) => {
 // 네트워크 우선(새 버전 즉시 반영), 오프라인이면 캐시
 self.addEventListener('fetch', (event) => {
     if (event.request.method !== 'GET') return;
+    // 동기화 API 응답(개인 기록)은 캐시하지 않는다
+    const { hostname } = new URL(event.request.url);
+    if (hostname === 'api.github.com' || hostname.endsWith('githubusercontent.com')) return;
     event.respondWith(
         fetch(event.request)
             .then((response) => {

@@ -243,3 +243,64 @@ export function buildIcs(events, leadMinutes, now = new Date()) {
 export function fitnessTotal(values = []) {
     return values.reduce((sum, v) => sum + (Number.parseFloat(v) || 0), 0);
 }
+
+// ---- 기기 간 동기화 ----
+// 병합 단위: 날짜별 하루 기록(updatedAt) + 공통 설정 묶음(metaUpdatedAt).
+// 같은 날을 두 기기에서 동시에 고치면 나중에 고친 쪽의 하루 전체가 남는다.
+
+export function dayHasData(d) {
+    if (!d) return false;
+    const rowData = d.rows?.some((r) => r.cat || r.action || r.plan || r.done || r.pri);
+    const fitData = Object.values(d.fitness ?? {}).some((vals) => vals.some((v) => String(v ?? '').trim()));
+    return Boolean(rowData || fitData
+        || Object.values(d.habitsDone ?? {}).some(Boolean)
+        || Object.values(d.note ?? {}).some((v) => v?.trim())
+        || Object.values(d.meta ?? {}).some((v) => String(v ?? '').trim()));
+}
+
+// 동기화 도입 전 기록에는 시각이 없다. 내용이 있으면 가장 오래된 시각(1)을 줘서
+// 빈 날(0)보다는 이기고, 이후 실제로 고친 기록에는 지게 한다
+export function migrateTimestamps(state) {
+    Object.values(state.days ?? {}).forEach((d) => {
+        if (!d.updatedAt && dayHasData(d)) d.updatedAt = 1;
+    });
+    return state;
+}
+
+// 원격에 올릴 내용. 알림 설정은 기기마다 권한이 달라 올리지 않는다
+export function toSyncPayload(state) {
+    const { notify, ...settings } = state.settings;
+    const days = Object.fromEntries(Object.entries(state.days).filter(([, d]) => d.updatedAt > 0));
+    return {
+        version: 1,
+        metaUpdatedAt: state.metaUpdatedAt ?? 0,
+        settings,
+        habits: state.habits,
+        exercises: state.exercises,
+        template: state.template ?? null,
+        days,
+    };
+}
+
+// 공통 설정은 시각이 같으면 원격을 따른다 (새 기기가 기존 습관 id 를 물려받도록)
+export function mergeStates(local, remote) {
+    if (!remote) return local;
+    const days = { ...local.days };
+    Object.entries(remote.days ?? {}).forEach(([key, r]) => {
+        const l = days[key];
+        if (!l || (r.updatedAt ?? 0) >= (l.updatedAt ?? 0)) days[key] = r;
+    });
+    const localMeta = local.metaUpdatedAt ?? 0;
+    const remoteMeta = remote.metaUpdatedAt ?? 0;
+    const src = localMeta > remoteMeta ? local : remote;
+    const { notify: _ignored, ...srcSettings } = src.settings ?? {};
+    return {
+        ...local,
+        settings: { ...local.settings, ...srcSettings, notify: local.settings.notify },
+        habits: src.habits ?? local.habits,
+        exercises: src.exercises ?? local.exercises,
+        template: src.template ?? null,
+        metaUpdatedAt: Math.max(localMeta, remoteMeta),
+        days,
+    };
+}

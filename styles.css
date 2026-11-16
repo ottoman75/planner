@@ -362,7 +362,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 .field > .label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .field .label { font-size: 13px; font-weight: 700; letter-spacing: 0.06em; color: var(--text-2); }
 
-.field textarea, .field input[type='text'], .field select, .field input[type='number'] {
+.field textarea, .field input[type='text'], .field input[type='password'], .field select, .field input[type='number'] {
     width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid var(--card-line); background: var(--plan-box);
     font-size: 16px; resize: vertical;
 }
@@ -393,6 +393,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 
 .hint { font-size: 13px; color: var(--text-2); line-height: 1.55; margin: 0; }
 .hint b { color: var(--text); }
+.hint a { color: var(--set); font-weight: 700; }
 .section-title { font-size: 15px; font-weight: 800; margin: 6px 0 -4px; }
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .btn-row .btn { flex: 1 1 140px; }
