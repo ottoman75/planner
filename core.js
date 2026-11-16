@@ -1,0 +1,245 @@
+// 플래너 도메인 로직 — DOM에 의존하지 않는 순수 함수만 둔다 (node --test 로 검증)
+
+export const CATEGORY_IDS = ['BOOK', 'ENGLISH', 'ACTIVE', 'PASSIVE', 'LIFE'];
+export const HOURS_PER_DAY = 24;
+export const FITNESS_SETS = 10;
+export const PRIORITY_MAX = 3;
+export const WEEKDAYS = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
+
+const MS_PER_MINUTE = 60_000;
+const NOON = 12;
+
+// [유효값 필드, "위 칸과 합치기" 플래그]
+const MERGE_FIELDS = [
+    ['cat', 'catMerge'],
+    ['action', 'actMerge'],
+    ['plan', 'planMerge'],
+];
+
+export function emptyRow() {
+    return {
+        cat: '',
+        action: '',
+        plan: '',
+        done: false,
+        pri: 0,
+        catMerge: false,
+        actMerge: false,
+        planMerge: false,
+        set: false,
+    };
+}
+
+// 템플릿은 시간(0~23)별 행 배열. 완료 여부는 가져오지 않는다
+export function emptyDay(template) {
+    const rows = Array.from({ length: HOURS_PER_DAY }, (_, hour) => {
+        const base = template?.[hour];
+        return base ? { ...emptyRow(), ...base, done: false } : emptyRow();
+    });
+    return {
+        rows,
+        habitsDone: {},
+        fitness: {},
+        meta: { sleep: '', weight: '' },
+        note: { keyword: '', idea: '', etc: '' },
+    };
+}
+
+// 행 → 템플릿으로 저장할 필드만 남긴다
+export function toTemplate(rows) {
+    return rows.map(({ done, ...rest }) => ({ ...rest }));
+}
+
+export function displayHours(startHour) {
+    return Array.from({ length: HOURS_PER_DAY }, (_, i) => (startHour + i) % HOURS_PER_DAY);
+}
+
+export function hourLabel(hour) {
+    const meridiem = hour < NOON ? 'AM' : 'PM';
+    const h12 = hour % NOON === 0 ? NOON : hour % NOON;
+    return `${meridiem} ${h12}:00`;
+}
+
+/**
+ * 표시 순서대로 각 행의 병합 정보와 유효값을 계산한다.
+ * - xxxSpan: 블록 첫 행이면 블록 길이, 블록에 덮인 행이면 0
+ * - xxxHead: 블록 첫 행의 hour
+ * - cat/action/plan: 블록 첫 행에서 물려받은 유효값
+ * - setNo/setSpan: SET 은 분류 블록 단위로 지정된다
+ */
+export function buildLayout(rows, startHour) {
+    const items = displayHours(startHour).map((hour, index) => ({ hour, index, row: rows[hour] }));
+
+    for (const [field, flag] of MERGE_FIELDS) {
+        let head = null;
+        items.forEach((item, i) => {
+            if (i > 0 && item.row[flag] && head) {
+                head[`${field}Span`] += 1;
+                item[`${field}Span`] = 0;
+                item[`${field}Head`] = head.hour;
+                item[field] = head.row[field];
+            } else {
+                head = item;
+                item[`${field}Span`] = 1;
+                item[`${field}Head`] = item.hour;
+                item[field] = item.row[field];
+            }
+        });
+    }
+
+    const byHour = new Map(items.map((item) => [item.hour, item]));
+    let setCount = 0;
+    items.forEach((item) => {
+        const head = byHour.get(item.catHead);
+        const isSet = Boolean(head.row.set && head.cat);
+        if (isSet && item === head) setCount += 1;
+        item.setNo = isSet ? setCount : 0;
+        item.setSpan = isSet && item === head ? item.catSpan : 0;
+    });
+
+    // ACTION 블록 전체가 완료되면 취소선
+    items.forEach((item, i) => {
+        item.actionDone = item.actionSpan > 0
+            && items.slice(i, i + item.actionSpan).every((it) => it.row.done);
+    });
+
+    return items;
+}
+
+export function hasContent(item) {
+    return Boolean(item.cat || item.action.trim() || item.plan.trim());
+}
+
+export function computeStats(layout) {
+    const counted = layout.filter((item) => hasContent(item) || item.row.done);
+    const done = counted.filter((item) => item.row.done).length;
+    const total = counted.length;
+    const hours = Object.fromEntries(CATEGORY_IDS.map((id) => [id, 0]));
+    layout.forEach((item) => {
+        if (item.cat in hours) hours[item.cat] += 1;
+    });
+    return {
+        done,
+        total,
+        percent: total ? Math.round((done / total) * 100) : 0,
+        hours,
+        sets: layout.filter((item) => item.setSpan > 0).length,
+    };
+}
+
+// ---- 날짜 ----
+
+export function toKey(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+export function parseKey(key) {
+    const [y, m, d] = key.split('-').map(Number);
+    return new Date(y, m - 1, d);
+}
+
+export function addDays(key, n) {
+    const date = parseKey(key);
+    date.setDate(date.getDate() + n);
+    return toKey(date);
+}
+
+/**
+ * 플래너 하루가 자정에 시작하지 않을 때 실제 시각을 구한다.
+ * - 시작 시각이 오후(예: 21시)면 시작 시각 이후 칸은 "전날 밤"
+ * - 시작 시각이 오전(예: 4시)이면 시작 시각 이전 칸은 "다음날 새벽"
+ */
+export function slotStart(dayKey, hour, startHour) {
+    let key = dayKey;
+    if (startHour >= NOON && hour >= startHour) key = addDays(dayKey, -1);
+    else if (startHour > 0 && startHour < NOON && hour < startHour) key = addDays(dayKey, 1);
+    const date = parseKey(key);
+    date.setHours(hour, 0, 0, 0);
+    return date;
+}
+
+// ---- 알림 / 캘린더 ----
+
+// ACTION 또는 PLAN 블록이 시작되는 칸마다 하나의 일정
+export function planEvents(dayKey, layout, startHour) {
+    return layout
+        .filter((item) => (item.actionSpan > 0 && item.action.trim()) || (item.planSpan > 0 && item.plan.trim()))
+        .map((item) => {
+            const actionHead = item.actionSpan > 0 && item.action.trim();
+            return {
+                dayKey,
+                hour: item.hour,
+                start: slotStart(dayKey, item.hour, startHour),
+                spanHours: actionHead ? item.actionSpan : item.planSpan,
+                cat: item.cat,
+                action: item.action.trim(),
+                plan: item.plan.trim(),
+                done: item.row.done,
+            };
+        });
+}
+
+export function eventTitle(event) {
+    return event.action || event.plan;
+}
+
+export function eventBody(event) {
+    const parts = [hourLabel(event.hour)];
+    if (event.cat) parts.push(event.cat);
+    if (event.action && event.plan) parts.push(`PLAN: ${event.plan}`);
+    return parts.join(' · ');
+}
+
+// (fromMs, toMs] 구간에 울려야 하는 알림. 이미 완료한 칸은 제외
+export function dueAlerts(events, leadMinutes, fromMs, toMs) {
+    return events.filter((event) => {
+        if (event.done) return false;
+        const fireAt = event.start.getTime() - leadMinutes * MS_PER_MINUTE;
+        return fireAt > fromMs && fireAt <= toMs;
+    });
+}
+
+function icsDate(date) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}T${pad(date.getHours())}${pad(date.getMinutes())}00`;
+}
+
+function icsUtc(date) {
+    return date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+}
+
+function icsText(text) {
+    return text.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/[,;]/g, (c) => `\\${c}`);
+}
+
+// 캘린더 앱에 넣으면 앱이 꺼져 있어도 알림이 온다 (floating local time)
+export function buildIcs(events, leadMinutes, now = new Date()) {
+    const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Planner//KO', 'CALSCALE:GREGORIAN'];
+    events.forEach((event) => {
+        const end = new Date(event.start.getTime() + event.spanHours * 60 * MS_PER_MINUTE);
+        lines.push(
+            'BEGIN:VEVENT',
+            `UID:${event.dayKey}-${event.hour}@planner`,
+            `DTSTAMP:${icsUtc(now)}`,
+            `DTSTART:${icsDate(event.start)}`,
+            `DTEND:${icsDate(end)}`,
+            `SUMMARY:${icsText(eventTitle(event))}`,
+            `DESCRIPTION:${icsText(eventBody(event))}`,
+            'BEGIN:VALARM',
+            'ACTION:DISPLAY',
+            `DESCRIPTION:${icsText(eventTitle(event))}`,
+            `TRIGGER:-PT${leadMinutes}M`,
+            'END:VALARM',
+            'END:VEVENT',
+        );
+    });
+    lines.push('END:VCALENDAR');
+    return `${lines.join('\r\n')}\r\n`;
+}
+
+export function fitnessTotal(values = []) {
+    return values.reduce((sum, v) => sum + (Number.parseFloat(v) || 0), 0);
+}
