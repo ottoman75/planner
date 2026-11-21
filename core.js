@@ -278,6 +278,7 @@ export function toSyncPayload(state) {
         habits: state.habits,
         exercises: state.exercises,
         template: state.template ?? null,
+        program: state.program ?? null,
         days,
     };
 }
@@ -300,6 +301,8 @@ export function mergeStates(local, remote) {
         habits: src.habits ?? local.habits,
         exercises: src.exercises ?? local.exercises,
         template: src.template ?? null,
+        // 프로그램 도입 전 기기가 올린 원격에는 program 이 없다 → 로컬 유지
+        program: src.program !== undefined ? src.program : (local.program ?? null),
         metaUpdatedAt: Math.max(localMeta, remoteMeta),
         days,
     };

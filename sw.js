@@ -1,8 +1,8 @@
 // 앱 셸 캐시 + 알림 클릭 처리. 파일을 바꾸면 VERSION 을 올린다
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE = `planner-${VERSION}`;
 const SHELL = [
-    './', 'index.html', 'styles.css', 'app.js', 'core.js', 'sync.js', 'manifest.webmanifest',
+    './', 'index.html', 'styles.css', 'app.js', 'core.js', 'sync.js', 'fitness-program.js', 'manifest.webmanifest',
     'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-180.png',
 ];
 

@@ -9,9 +9,10 @@
 ## 구조
 - `core.js` — 순수 도메인 로직(병합 레이아웃, 통계, 날짜, 알림 일정, .ics). DOM 금지
 - `app.js` — 렌더링·이벤트·알림 틱·설정. 계산은 반드시 `core.js` 를 거친다 (같은 로직 두 벌 금지)
+- `fitness-program.js` — 8주 운동 프로그램 표와 날짜→그날 목표 계산(순수). 기록 키는 `pg:` 접두사로 사용자 운동 id 와 분리
 - `sync.js` — GitHub Gist API 호출만. 병합 규칙은 `core.js` 의 `mergeStates`
 - `sw.js` — 앱 셸 캐시(네트워크 우선) + 알림 클릭 처리. GitHub API 응답은 캐시하지 않는다
-- `tests/core.test.js` — `npm test` (node --test)
+- `tests/*.test.js` — `npm test` (node --test)
 
 ## 작업 규칙
 - 정적 파일을 바꾸면 `sw.js` 의 `VERSION` 을 올린다
@@ -19,7 +20,7 @@
 - 동기화 토큰은 `planner.sync` 에만 둔다. 백업 파일(`planner.v1`)에 섞지 말 것
 - 동기화 수동 검증: 로컬 목 Gist 서버 + `localhost` / `127.0.0.1` 두 오리진을 두 기기로 쓴다 (실제 토큰 사용 금지)
 - 저장 데이터 스키마는 필드를 **추가만** 한다. `loadState()` 가 기본값과 병합하므로 키 이름을 바꾸지 말 것
-- 로컬 확인: `npm start` (또는 `python3 -m http.server 5173`) 후 http://localhost:5173
+- 로컬 확인: `npm start` (또는 `python3 -m http.server 5173`) 후 http://localhost:5173 (5173 이 다른 프로젝트에 잡혀 있으면 다른 포트)
 - 모바일 폭(390px)에서 가로 스크롤이 생기지 않는지 확인한다. 그리드 열은 `minmax(0, 1fr)` 로
 - 공개 저장소다. 개인 기록·실데이터를 코드나 테스트에 넣지 않는다
 

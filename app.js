@@ -5,6 +5,7 @@ import {
     migrateTimestamps, toSyncPayload, mergeStates,
 } from './core.js';
 import { findGist, createGist, readGist, writeGist } from './sync.js';
+import { programDay, mondayOf } from './fitness-program.js';
 
 const STORE_KEY = 'planner.v1';
 const TICK_KEY = 'planner.lastTick';
@@ -50,6 +51,8 @@ function defaultState() {
         habits: habits.map((name, i) => ({ id: `h${i + 1}`, name })),
         exercises: exercises.map(([name, unit], i) => ({ id: `e${i + 1}`, name, unit })),
         template: null,
+        // 8주 운동 프로그램. null 이면 꺼짐
+        program: { startDate: mondayOf(toKey(new Date())) },
         metaUpdatedAt: 0,
         days: {},
     };
@@ -222,44 +225,97 @@ function renderTable(layout) {
     $('#ttBody').innerHTML = html;
 }
 
-function renderFitness() {
-    const d = day();
-    const head = `
+function fitnessHead(d, subtitle) {
+    return `
         <div class="panel-head">
             <span class="panel-icon">${ICONS.dumbbell}</span>
-            <h2 class="panel-title">FITNESS</h2>
+            <div class="panel-titles">
+                <h2 class="panel-title">FITNESS</h2>
+                ${subtitle ? `<span class="panel-sub">${subtitle}</span>` : ''}
+            </div>
             <div class="panel-aside">
                 <span>수면 <input class="mini-input" data-meta="sleep" inputmode="decimal" value="${esc(d.meta.sleep)}" aria-label="수면 시간">시간</span>
                 <span>· 체중 <input class="mini-input" data-meta="weight" inputmode="decimal" value="${esc(d.meta.weight)}" aria-label="체중">kg</span>
                 <button type="button" class="edit-toggle" data-toggle="fitness">${editFitness ? '완료' : '편집'}</button>
             </div>
         </div>`;
-    if (editFitness) {
-        const rows = state.exercises.map((ex, i) => `
-            <div class="edit-row">
-                <input data-ex-name="${i}" value="${esc(ex.name)}" placeholder="운동 이름" aria-label="운동 이름">
-                <select data-ex-unit="${i}" aria-label="단위">${UNITS.map((u) => `<option${u === ex.unit ? ' selected' : ''}>${u}</option>`).join('')}</select>
-                <button type="button" class="del-btn" data-ex-del="${i}" aria-label="${esc(ex.name)} 삭제">✕</button>
-            </div>`).join('');
-        $('#fitness').innerHTML = `${head}<div class="edit-list">${rows}<button type="button" class="add-btn" data-ex-add>+ 운동 추가</button></div>`;
-        return;
-    }
+}
+
+// 합계 칸: 실제 합계 위, 목표 아래
+function fitnessTotalHtml(values, target) {
+    const actual = fitnessTotal(values);
+    if (!target) return formatNum(actual);
+    if (target.note) return `${formatNum(actual)}<small>${esc(target.note)}</small>`;
+    if (!target.sets) return actual ? formatNum(actual) : '<small>휴식</small>';
+    return `${formatNum(actual)}<small>/${target.total}</small>`;
+}
+
+function fitnessTotalClass(values, target) {
+    return target?.sets && fitnessTotal(values) >= target.total ? 'total met' : 'total';
+}
+
+function fitnessEditHtml() {
+    const program = state.program;
+    const programBox = `
+        <div class="program-box">
+            <div class="label-row"><span class="label">8주 프로그램</span>
+                <button type="button" class="edit-toggle" data-program-toggle>${program ? '끄기' : '켜기'}</button></div>
+            ${program ? `
+            <label class="program-start">시작일 (1주차 월요일)
+                <input type="date" data-program-start value="${esc(program.startDate)}"></label>
+            <p class="hint">기간 안의 날에는 요일에 맞는 목표가 회색으로 보이고, 실제로 한 횟수를 입력하면 돼요.</p>` : '<p class="hint">켜면 날짜별 세트 목표가 표시돼요.</p>'}
+        </div>`;
+    const rows = state.exercises.map((ex, i) => `
+        <div class="edit-row">
+            <input data-ex-name="${i}" value="${esc(ex.name)}" placeholder="운동 이름" aria-label="운동 이름">
+            <select data-ex-unit="${i}" aria-label="단위">${UNITS.map((u) => `<option${u === ex.unit ? ' selected' : ''}>${u}</option>`).join('')}</select>
+            <button type="button" class="del-btn" data-ex-del="${i}" aria-label="${esc(ex.name)} 삭제">✕</button>
+        </div>`).join('');
+    return `${programBox}
+        <p class="section-title" style="margin-top:14px">프로그램 밖의 날 운동 목록</p>
+        <div class="edit-list">${rows}<button type="button" class="add-btn" data-ex-add>+ 운동 추가</button></div>`;
+}
+
+function fitnessTable(rows, d) {
     const nums = Array.from({ length: FITNESS_SETS }, (_, i) => `<th>${i + 1}</th>`).join('');
-    const rows = state.exercises.map((ex) => {
-        const values = d.fitness[ex.id] ?? [];
-        const inputs = Array.from({ length: FITNESS_SETS }, (_, i) => `
-            <td><input class="rep" data-ex="${ex.id}" data-i="${i}" inputmode="decimal" value="${esc(values[i])}" aria-label="${esc(ex.name)} ${i + 1}세트"></td>`).join('');
-        return `<tr>
-            <td class="ex-name">${esc(ex.name)}<small>${esc(ex.unit)}</small></td>${inputs}
-            <td class="total" data-total="${ex.id}">${formatNum(fitnessTotal(values))}</td>
+    const body = rows.map(({ key, name, unit, target }) => {
+        const values = d.fitness[key] ?? [];
+        const inputs = Array.from({ length: FITNESS_SETS }, (_, i) => {
+            const planned = target && i < target.sets;
+            return `<td${planned ? ' class="planned"' : ''}><input class="rep" data-ex="${key}" data-i="${i}" inputmode="decimal"
+                value="${esc(values[i])}"${planned ? ` placeholder="${target.rep}"` : ''}
+                aria-label="${esc(name)} ${i + 1}세트${planned ? ` 목표 ${target.rep}` : ''}"></td>`;
+        }).join('');
+        const rest = target && !target.sets && !target.note ? ' class="rest"' : '';
+        return `<tr${rest}>
+            <td class="ex-name">${esc(name)}<small>${esc(unit)}</small></td>${inputs}
+            <td class="${fitnessTotalClass(values, target)}" data-total="${key}">${fitnessTotalHtml(values, target)}</td>
         </tr>`;
     }).join('');
-    $('#fitness').innerHTML = `${head}
-        <div class="fit-wrap"><table class="fit">
-            <colgroup><col class="c-name">${'<col>'.repeat(FITNESS_SETS)}<col class="c-total"></colgroup>
-            <thead><tr><th></th>${nums}<th class="total">합계</th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="${FITNESS_SETS + 2}" class="hint">편집을 눌러 운동을 추가하세요</td></tr>`}</tbody>
-        </table></div>`;
+    return `<div class="fit-wrap"><table class="fit">
+        <colgroup><col class="c-name">${'<col>'.repeat(FITNESS_SETS)}<col class="c-total"></colgroup>
+        <thead><tr><th></th>${nums}<th class="total">합계</th></tr></thead>
+        <tbody>${body || `<tr><td colspan="${FITNESS_SETS + 2}" class="hint">편집을 눌러 운동을 추가하세요</td></tr>`}</tbody>
+    </table></div>`;
+}
+
+// 보고 있는 날의 운동 행 — 프로그램 기간이면 프로그램 목표, 아니면 사용자 목록
+function fitnessRows() {
+    const plan = programDay(state.program?.startDate, currentKey);
+    if (plan) return { plan, rows: plan.rows.map((r) => ({ key: r.key, name: r.name, unit: r.unit, target: r })) };
+    return { plan: null, rows: state.exercises.map((ex) => ({ key: ex.id, name: ex.name, unit: ex.unit, target: null })) };
+}
+
+function renderFitness() {
+    const d = day();
+    const { plan, rows } = fitnessRows();
+    const subtitle = plan ? `${plan.week + 1}주차 · ${esc(plan.stage)} · ${plan.dayLabel}` : '';
+    if (editFitness) {
+        $('#fitness').innerHTML = fitnessHead(d, subtitle) + fitnessEditHtml();
+        return;
+    }
+    const tip = plan ? `<p class="fit-tip">${esc(plan.tip)}</p>` : '';
+    $('#fitness').innerHTML = fitnessHead(d, subtitle) + fitnessTable(rows, d) + tip;
 }
 
 function formatNum(n) {
@@ -461,7 +517,10 @@ $('#fitness').addEventListener('input', (e) => {
         const values = d.fitness[t.dataset.ex] ?? Array(FITNESS_SETS).fill('');
         values[Number(t.dataset.i)] = t.value;
         d.fitness[t.dataset.ex] = values;
-        $(`[data-total="${t.dataset.ex}"]`).textContent = formatNum(fitnessTotal(values));
+        const { target } = fitnessRows().rows.find((r) => r.key === t.dataset.ex) ?? {};
+        const cell = $(`[data-total="${t.dataset.ex}"]`);
+        cell.innerHTML = fitnessTotalHtml(values, target);
+        cell.className = fitnessTotalClass(values, target);
     } else if (t.dataset.meta) {
         d.meta[t.dataset.meta] = t.value;
     } else if (t.dataset.exName) {
@@ -470,6 +529,13 @@ $('#fitness').addEventListener('input', (e) => {
         state.exercises[Number(t.dataset.exUnit)].unit = t.value;
     }
     save(t.dataset.ex || t.dataset.meta ? 'day' : 'meta');
+});
+
+$('#fitness').addEventListener('change', (e) => {
+    if (!e.target.matches('[data-program-start]') || !e.target.value) return;
+    state.program = { startDate: e.target.value };
+    save('meta');
+    renderFitness();
 });
 
 $('#fitness').addEventListener('click', (e) => {
@@ -481,11 +547,14 @@ $('#fitness').addEventListener('click', (e) => {
     } else if (e.target.closest('[data-ex-del]')) {
         state.exercises.splice(Number(e.target.closest('[data-ex-del]').dataset.exDel), 1);
         save('meta');
+    } else if (e.target.closest('[data-program-toggle]')) {
+        state.program = state.program ? null : { startDate: mondayOf(currentKey) };
+        save('meta');
     } else {
         return;
     }
     renderFitness();
-    if (editFitness) $('#fitness .edit-row:last-of-type input')?.focus();
+    if (e.target.closest('[data-ex-add]')) $('#fitness .edit-row:last-of-type input')?.focus();
 });
 
 $('#habits').addEventListener('input', (e) => {
@@ -1065,6 +1134,8 @@ setInterval(() => {
 }, SYNC_POLL_MS);
 
 render.openedOn = currentKey;
+// 처음 정해진 기본값(프로그램 시작일 등)을 바로 저장해 다음 주에 바뀌지 않게 한다
+persistNow();
 render();
 tick();
 syncNow();

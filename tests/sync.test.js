@@ -76,3 +76,14 @@ test('원격이 없으면(첫 연결) 로컬 그대로', () => {
     const local = makeState();
     assert.equal(mergeStates(local, null), local);
 });
+
+test('운동 프로그램 설정도 공통 설정으로 동기화, 옛 원격엔 없으면 로컬 유지', () => {
+    const local = makeState({ program: { startDate: '2026-11-16' } });
+    assert.deepEqual(toSyncPayload(local).program, { startDate: '2026-11-16' });
+    const oldRemote = makeState();
+    assert.deepEqual(mergeStates(local, oldRemote).program, { startDate: '2026-11-16' });
+    const newer = makeState({ program: { startDate: '2026-11-23' }, metaUpdatedAt: 9 });
+    assert.deepEqual(mergeStates(local, newer).program, { startDate: '2026-11-23' });
+    const off = makeState({ program: null, metaUpdatedAt: 9 });
+    assert.equal(mergeStates(local, off).program, null);
+});
