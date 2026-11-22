@@ -209,7 +209,7 @@ function calChipsHtml(events) {
     if (!events.length) return '';
     const chips = events.slice(0, CAL_CHIPS_MAX).map((e) => {
         const time = e.continued ? '↳' : clockLabel(e.startMs);
-        return `<span class="cal-chip" title="${esc(e.title)}"><b>${time}</b> ${esc(e.title)}</span>`;
+        return `<span class="cal-chip${e.continued ? ' cont' : ''}" title="${esc(e.title)}"><b>${time}</b> ${esc(e.title)}</span>`;
     }).join('');
     const more = events.length > CAL_CHIPS_MAX ? `<span class="cal-chip more">+${events.length - CAL_CHIPS_MAX}</span>` : '';
     return `<span class="cal-chips">${chips}${more}</span>`;
@@ -267,7 +267,15 @@ function renderTable(layout) {
         cells.push(`<td class="line"><button class="pri-btn" data-pri="${item.hour}" aria-label="우선순위 ${item.row.pri || '없음'}">${pri}</button></td>`);
         cells.push(`<td class="line"><button class="check-btn" data-check="${item.hour}" role="checkbox" aria-checked="${item.row.done}" aria-label="${hourLabel(item.hour)} 완료"><span class="check${item.row.done ? ' on' : ''}">${ICONS.check}</span></button></td>`);
         if (item.planSpan > 0) {
-            const events = layout.slice(i, i + item.planSpan).flatMap((it) => cal.byHour[it.hour] ?? []);
+            // 합쳐진 PLAN 블록 안에서 같은 일정은 한 번만 (처음 나온 칸 기준)
+            const seen = new Set();
+            const events = layout.slice(i, i + item.planSpan).flatMap((it) => cal.byHour[it.hour] ?? [])
+                .filter((e) => {
+                    const key = `${e.uid}|${e.start}`;
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                });
             cells.push(`<td class="line" rowspan="${item.planSpan}">${planCell(item, events)}</td>`);
         }
         return `<tr class="${cls}" data-hour="${item.hour}">${cells.join('')}</tr>`;

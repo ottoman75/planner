@@ -6,6 +6,21 @@ import { calendarForDay, eventsInSlot } from '../core.js';
 const at = (y, m, d, h, mi = 0) => new Date(y, m - 1, d, h, mi).toISOString();
 const timed = (title, start, end) => ({ title, allDay: false, start, end });
 
+test('여러 시간에 걸친 일정은 걸친 칸마다 표시, 끝 시각 칸은 제외 — 11/28 수영 7~9시 사례', () => {
+    const events = [timed('수영', at(2026, 11, 28, 7), at(2026, 11, 28, 9))];
+    const { byHour } = calendarForDay(events, '2026-11-28', 21);
+    assert.deepEqual(byHour[7].map((e) => [e.title, e.continued]), [['수영', false]]);
+    assert.deepEqual(byHour[8].map((e) => [e.title, e.continued]), [['수영', true]]);
+    assert.equal(byHour[9], undefined);
+});
+
+test('정각이 아닌 시작: 9:30~10:30 은 9시(시작)와 10시(이어짐)', () => {
+    const events = [timed('회의', at(2026, 11, 23, 9, 30), at(2026, 11, 23, 10, 30))];
+    const { byHour } = calendarForDay(events, '2026-11-23', 21);
+    assert.equal(byHour[9][0].continued, false);
+    assert.equal(byHour[10][0].continued, true);
+});
+
 test('일정은 시작하는 칸에 놓이고, 하루 시작(PM 9) 전날 밤 일정도 이 날짜에 속한다', () => {
     const events = [
         timed('회의', at(2026, 11, 23, 9, 30), at(2026, 11, 23, 10, 30)),

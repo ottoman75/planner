@@ -312,16 +312,15 @@ export function mergeStates(local, remote) {
 // events: calendar-ics.js 의 expandEvents 결과. 시간 일정은 UTC ISO, 종일은 'YYYY-MM-DD'
 
 const HOUR_MS = 60 * MS_PER_MINUTE;
-const DAY_MS = 24 * HOUR_MS;
 
 /**
  * 플래너 하루(첫 표시 칸부터 24시간)에 걸치는 일정을 칸에 배치한다
- * - byHour[h]: 그 칸에서 "시작하는" 일정 (하루 시작 전에 시작했으면 첫 칸, continued=true)
+ * - byHour[h]: 그 칸(1시간)과 겹치는 일정. 끝 시각 칸은 미포함(7~9시 → 7시·8시 칸)
+ *   그 칸보다 먼저 시작한 일정은 continued=true (화면에서 "↳ 이어짐")
  * - allDay: 이 날짜를 포함하는 종일 일정
  */
 export function calendarForDay(events, dayKey, startHour) {
-    const first = slotStart(dayKey, startHour, startHour).getTime();
-    const last = first + DAY_MS;
+    const slots = displayHours(startHour).map((hour) => ({ hour, from: slotStart(dayKey, hour, startHour).getTime() }));
     const byHour = {};
     const allDay = [];
     (events ?? []).forEach((e) => {
@@ -331,9 +330,10 @@ export function calendarForDay(events, dayKey, startHour) {
         }
         const startMs = Date.parse(e.start);
         const endMs = Math.max(Date.parse(e.end), startMs + 1);
-        if (startMs >= last || endMs <= first) return;
-        const hour = new Date(Math.max(startMs, first)).getHours();
-        (byHour[hour] ??= []).push({ ...e, startMs, endMs, continued: startMs < first });
+        slots.forEach(({ hour, from }) => {
+            if (startMs >= from + HOUR_MS || endMs <= from) return;
+            (byHour[hour] ??= []).push({ ...e, startMs, endMs, continued: startMs < from });
+        });
     });
     return { byHour, allDay };
 }
