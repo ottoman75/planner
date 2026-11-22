@@ -10,6 +10,8 @@
 - `core.js` — 순수 도메인 로직(병합 레이아웃, 통계, 날짜, 알림 일정, .ics). DOM 금지
 - `app.js` — 렌더링·이벤트·알림 틱·설정. 계산은 반드시 `core.js` 를 거친다 (같은 로직 두 벌 금지)
 - `fitness-program.js` — 8주 운동 프로그램 표와 날짜→그날 목표 계산(순수). 기록 키는 `pg:` 접두사로 사용자 운동 id 와 분리
+- `calendar-ics.js` — .ics 해석·반복 일정 펼치기(순수). GitHub Actions 와 테스트에서만 쓰고 앱은 import 하지 않는다
+- `scripts/fetch-calendar.mjs` + `.github/workflows/calendar.yml` — 30분마다 캘린더 링크(Gist 설정의 `calendarUrls`) → Gist `planner-calendar.json`. 시크릿 `PLANNER_GIST_TOKEN` 필요
 - `sync.js` — GitHub Gist API 호출만. 병합 규칙은 `core.js` 의 `mergeStates`
 - `sw.js` — 앱 셸 캐시(네트워크 우선) + 알림 클릭 처리. GitHub API 응답은 캐시하지 않는다
 - `tests/*.test.js` — `npm test` (node --test)
@@ -22,9 +24,12 @@
 - 저장 데이터 스키마는 필드를 **추가만** 한다. `loadState()` 가 기본값과 병합하므로 키 이름을 바꾸지 말 것
 - 로컬 확인: `npm start` (또는 `python3 -m http.server 5173`) 후 http://localhost:5173 (5173 이 다른 프로젝트에 잡혀 있으면 다른 포트)
 - 모바일 폭(390px)에서 가로 스크롤이 생기지 않는지 확인한다. 그리드 열은 `minmax(0, 1fr)` 로
-- 공개 저장소다. 개인 기록·실데이터를 코드나 테스트에 넣지 않는다
+- 공개 저장소다. 개인 기록·실데이터를 코드나 테스트에 넣지 않는다. Actions 로그도 공개 — 캘린더 링크·일정 제목을 출력하지 말 것
+- 캘린더 수집 로컬 검증: 목 Gist 서버 + `GITHUB_API_URL=http://localhost:8787 PLANNER_GIST_TOKEN=test-token node scripts/fetch-calendar.mjs`
+- 캘린더 일정(`planner.calendar`)은 읽기 전용 사본. 동기화로 올리거나 백업 파일에 넣지 않는다
 
 ## 알려진 제약
+- 캘린더 반영은 최대 30분(+GitHub 예약 실행 지연) 늦다. iCloud 공개 캘린더만 지원
 - 동기화는 하루 단위 last-write-wins. 같은 날을 동기화 사이에 두 기기에서 고치면 한쪽이 사라진다
 - 웹 알림은 앱이 열려 있거나 백그라운드일 때만. 완전히 닫혀 있으면 캘린더(.ics) 내보내기로 대체
 - iPhone 은 홈 화면에 추가한 앱(iOS 16.4+)에서만 알림 권한을 요청할 수 있다

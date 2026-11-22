@@ -2,7 +2,7 @@ import {
     CATEGORY_IDS, FITNESS_SETS, PRIORITY_MAX, WEEKDAYS,
     emptyRow, emptyDay, toTemplate, displayHours, hourLabel, buildLayout, computeStats,
     toKey, parseKey, addDays, slotStart, planEvents, eventTitle, eventBody, dueAlerts, buildIcs, fitnessTotal,
-    migrateTimestamps, toSyncPayload, mergeStates,
+    migrateTimestamps, toSyncPayload, mergeStates, calendarForDay, eventsInSlot, clockLabel,
 } from './core.js';
 import { findGist, createGist, readGist, writeGist } from './sync.js';
 import { programDay, mondayOf } from './fitness-program.js';
@@ -13,6 +13,9 @@ const TICK_KEY = 'planner.lastTick';
 const SYNC_KEY = 'planner.sync';
 const SYNC_PUSH_DELAY_MS = 1500;
 const SYNC_POLL_MS = 60_000;
+// 아이폰 캘린더 일정(Gist 의 planner-calendar.json 사본). 읽기 전용이라 동기화·백업에 넣지 않는다
+const CALENDAR_KEY = 'planner.calendar';
+const CAL_CHIPS_MAX = 2;
 const SAVE_DELAY_MS = 250;
 const TICK_INTERVAL_MS = 15_000;
 const MAX_CATCHUP_MS = 10 * 60_000;
@@ -47,6 +50,7 @@ function defaultState() {
             title: '4X 플래너',
             startHour: DEFAULT_START_HOUR,
             notify: { enabled: false, lead: 0 },
+            calendarUrls: [],
         },
         habits: habits.map((name, i) => ({ id: `h${i + 1}`, name })),
         exercises: exercises.map(([name, unit], i) => ({ id: `e${i + 1}`, name, unit })),
@@ -179,6 +183,46 @@ function renderSummary(stats) {
         <div class="cat-hours">${cats}</div>`;
 }
 
+function loadCalendar() {
+    try {
+        return JSON.parse(localStorage.getItem(CALENDAR_KEY)) || null;
+    } catch {
+        return null;
+    }
+}
+
+let calendar = loadCalendar();
+
+// 원격에서 받은 캘린더가 바뀌었으면 저장하고 true
+function updateCalendar(next) {
+    if (!next || next.fetchedAt === calendar?.fetchedAt) return false;
+    calendar = next;
+    try {
+        localStorage.setItem(CALENDAR_KEY, JSON.stringify(next));
+    } catch {
+        // 저장 못 해도 이번 화면에는 보인다
+    }
+    return true;
+}
+
+function calChipsHtml(events) {
+    if (!events.length) return '';
+    const chips = events.slice(0, CAL_CHIPS_MAX).map((e) => {
+        const time = e.continued ? '↳' : clockLabel(e.startMs);
+        return `<span class="cal-chip" title="${esc(e.title)}"><b>${time}</b> ${esc(e.title)}</span>`;
+    }).join('');
+    const more = events.length > CAL_CHIPS_MAX ? `<span class="cal-chip more">+${events.length - CAL_CHIPS_MAX}</span>` : '';
+    return `<span class="cal-chips">${chips}${more}</span>`;
+}
+
+function renderAllDay(allDay) {
+    const el = $('#calAllDay');
+    el.hidden = !allDay.length;
+    el.innerHTML = allDay.length
+        ? `<span class="cal-allday-label">📅 종일</span>${allDay.map((e) => `<span class="cal-chip">${esc(e.title)}</span>`).join('')}`
+        : '';
+}
+
 function isNowSlot(hour) {
     const start = slotStart(currentKey, hour, state.settings.startHour).getTime();
     const now = Date.now();
@@ -193,8 +237,9 @@ function catCell(item) {
     return `<button class="cell-btn" style="padding:0" data-edit="${item.hour}">${inner}</button>`;
 }
 
-function planCell(item) {
-    const text = esc(item.plan);
+// PLAN 칸: 계획 글자 + 그 블록 시간에 시작하는 캘린더 일정
+function planCell(item, events) {
+    const text = `<span class="plan-text">${esc(item.plan)}</span>${calChipsHtml(events)}`;
     if (item.planSpan > 1) {
         return `<button class="cell-btn" style="padding:0" data-edit="${item.hour}"><span class="plan-block plan">${text}</span></button>`;
     }
@@ -202,7 +247,9 @@ function planCell(item) {
 }
 
 function renderTable(layout) {
-    const html = layout.map((item) => {
+    const cal = calendarForDay(calendar?.events, currentKey, state.settings.startHour);
+    renderAllDay(cal.allDay);
+    const html = layout.map((item, i) => {
         const cls = [item.setNo ? 'in-set' : '', isNowSlot(item.hour) ? 'now' : ''].join(' ').trim();
         const cells = [];
         if (item.setSpan > 0) {
@@ -219,7 +266,10 @@ function renderTable(layout) {
         const pri = item.row.pri ? `<span class="pri p${item.row.pri}">${item.row.pri}</span>` : '';
         cells.push(`<td class="line"><button class="pri-btn" data-pri="${item.hour}" aria-label="우선순위 ${item.row.pri || '없음'}">${pri}</button></td>`);
         cells.push(`<td class="line"><button class="check-btn" data-check="${item.hour}" role="checkbox" aria-checked="${item.row.done}" aria-label="${hourLabel(item.hour)} 완료"><span class="check${item.row.done ? ' on' : ''}">${ICONS.check}</span></button></td>`);
-        if (item.planSpan > 0) cells.push(`<td class="line" rowspan="${item.planSpan}">${planCell(item)}</td>`);
+        if (item.planSpan > 0) {
+            const events = layout.slice(i, i + item.planSpan).flatMap((it) => cal.byHour[it.hour] ?? []);
+            cells.push(`<td class="line" rowspan="${item.planSpan}">${planCell(item, events)}</td>`);
+        }
         return `<tr class="${cls}" data-hour="${item.hour}">${cells.join('')}</tr>`;
     }).join('');
     $('#ttBody').innerHTML = html;
@@ -448,10 +498,21 @@ function buildRowForm() {
             <span class="label">우선순위</span>
             <div class="chips">${priChips}</div>
         </div>
+        ${slotEventsHtml(hour)}
         <div class="sheet-actions">
             <button type="button" class="btn${row.done ? ' ok' : ''}" data-act="done">${row.done ? '✓ 완료함' : '완료 체크'}</button>
             <button type="button" class="btn danger" data-act="clear">이 칸 비우기</button>
         </div>`;
+}
+
+function slotEventsHtml(hour) {
+    const events = eventsInSlot(calendar?.events, currentKey, hour, state.settings.startHour);
+    if (!events.length) return '';
+    const items = events.map((e, i) => `
+        <li><span><b>${clockLabel(Date.parse(e.start))}–${clockLabel(Date.parse(e.end))}</b> ${esc(e.title)}
+            ${e.location ? `<small>${esc(e.location)}</small>` : ''}</span>
+            <button type="button" class="btn small" data-cal-plan="${i}">PLAN에 넣기</button></li>`).join('');
+    return `<div class="field"><span class="label">📅 아이폰 캘린더</span><ul class="slot-events">${items}</ul></div>`;
 }
 
 function applyRowForm() {
@@ -489,6 +550,16 @@ $('#rowForm').addEventListener('click', (e) => {
         const hours = displayHours(state.settings.startHour);
         const idx = hours.indexOf(sheetHour) + Number(move.dataset.move);
         if (idx >= 0 && idx < hours.length) openRow(hours[idx]);
+        return;
+    }
+    const calBtn = e.target.closest('[data-cal-plan]');
+    if (calBtn) {
+        const event = eventsInSlot(calendar?.events, currentKey, sheetHour, state.settings.startHour)[Number(calBtn.dataset.calPlan)];
+        const item = layoutOf().find((it) => it.hour === sheetHour);
+        if (event && item) day().rows[item.planHead].plan = event.title;
+        save();
+        renderBoard();
+        buildRowForm();
         return;
     }
     const act = e.target.closest('[data-act]');
@@ -836,12 +907,13 @@ async function syncNow({ manual = false } = {}) {
     clearTimeout(pushTimer);
     syncing = (async () => {
         try {
-            const remote = await readGist(config.token, config.gistId);
+            const { data: remote, calendar: remoteCalendar } = await readGist(config.token, config.gistId);
             const before = state;
             const merged = mergeStates(state, remote);
             state = merged;
             persistNow();
-            if (remoteBroughtChanges(before, merged)) {
+            const calendarChanged = updateCalendar(remoteCalendar);
+            if (remoteBroughtChanges(before, merged) || calendarChanged) {
                 if (isTyping()) {
                     renderHeader();
                     renderBoard();
@@ -854,6 +926,7 @@ async function syncNow({ manual = false } = {}) {
             writeSyncConfig({ ...config, lastSync: Date.now() });
             syncError = '';
             if (manual) toast('동기화했어요');
+            updateCalendarStatus();
         } catch (err) {
             const first = !syncError;
             syncError = err.message;
@@ -930,6 +1003,40 @@ function syncSectionHtml() {
         </div>`;
 }
 
+// ---------- 아이폰 캘린더 설정 ----------
+
+function calendarStatusText() {
+    if (!readSyncConfig()) return '동기화 먼저';
+    if (!state.settings.calendarUrls?.length) return '꺼짐';
+    if (!calendar) return '첫 수집 대기 중';
+    if (calendar.errors?.length) return '오류';
+    const t = new Date(calendar.fetchedAt);
+    return `일정 ${calendar.events.length}개 · ${t.getMonth() + 1}/${t.getDate()} ${clockLabel(t.getTime())}`;
+}
+
+function updateCalendarStatus() {
+    const pill = document.getElementById('calStatus');
+    if (!pill) return;
+    pill.textContent = calendarStatusText();
+    pill.classList.toggle('on', Boolean(calendar && !calendar.errors?.length && state.settings.calendarUrls?.length));
+    const err = document.getElementById('calErrors');
+    if (err) err.textContent = calendar?.errors?.join(' / ') ?? '';
+}
+
+function calendarSectionHtml() {
+    const urls = (state.settings.calendarUrls ?? []).join('\n');
+    return `
+        <p class="section-title">📅 아이폰 캘린더 가져오기 <span class="status-pill" id="calStatus"></span></p>
+        <p class="hint">캘린더 일정을 시간표 PLAN 칸에 작게 보여줘요(30분마다 갱신, PLAN 내용은 바꾸지 않아요).
+        ${readSyncConfig() ? '' : '<br><b>위의 기기 간 동기화를 먼저 연결해야 해요.</b>'}<br>
+        1. 아이폰 <b>캘린더</b> 앱 → 아래 <b>캘린더</b> → 가져올 캘린더의 ⓘ → <b>공개 캘린더</b> 켜기 → <b>링크 공유 → 복사</b><br>
+        2. 아래 칸에 붙여넣기 (여러 개면 한 줄에 하나)<br>
+        ⚠️ 공개 캘린더는 링크를 아는 사람이면 볼 수 있어요. 링크를 다른 곳에 올리지 마세요.
+        <span id="calErrors" style="color:#d0453a;display:block"></span></p>
+        <div class="field"><textarea name="calendarUrls" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false"
+            placeholder="webcal://p00-caldav.icloud.com/published/2/..." aria-label="캘린더 공유 링크">${esc(urls)}</textarea></div>`;
+}
+
 // ---------- 설정 시트 ----------
 
 function notifyStatus() {
@@ -949,6 +1056,7 @@ function buildSettingsForm() {
         <div class="sheet-head"><h2>설정</h2><span class="grow"></span><button type="submit" class="btn small primary" value="close">닫기</button></div>
 
         ${syncSectionHtml()}
+        ${calendarSectionHtml()}
 
         <div class="field"><span class="label">플래너 이름</span><input type="text" name="title" value="${esc(s.title)}"></div>
         <div class="field">
@@ -996,6 +1104,7 @@ function buildSettingsForm() {
         </div>
         <button type="button" class="btn danger" data-set="reset-day">이 날 기록 모두 지우기</button>`;
     updateSyncStatus();
+    updateCalendarStatus();
 }
 
 function copyRowsFrom(sourceRows) {
@@ -1012,6 +1121,12 @@ $('#settingsForm').addEventListener('change', (e) => {
     if (t.name === 'title') {
         state.settings.title = t.value.trim() || defaultState().settings.title;
         save('meta');
+    } else if (t.name === 'calendarUrls') {
+        state.settings.calendarUrls = t.value.split(/\s+/).map((u) => u.trim()).filter((u) => /^(webcals?|https?):\/\//i.test(u));
+        save('meta');
+        updateCalendarStatus();
+        toast(state.settings.calendarUrls.length ? '캘린더 링크를 저장했어요. 30분 안에 일정이 들어와요' : '캘린더 가져오기를 껐어요');
+        return;
     } else if (t.name === 'startHour') {
         state.settings.startHour = Number(t.value);
         save('meta');
