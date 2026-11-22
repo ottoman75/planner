@@ -57,3 +57,59 @@ test('eventsInSlot: 칸과 겹치는 일정 (경계는 미포함)', () => {
 test('일정이 없거나 null 이어도 안전', () => {
     assert.deepEqual(calendarForDay(null, '2026-11-23', 21), { byHour: {}, allDay: [] });
 });
+
+import { emptyDay, buildLayout, planColumn } from '../core.js';
+
+function dayLayout(patch, startHour = 6) {
+    const d = emptyDay();
+    Object.entries(patch).forEach(([h, p]) => Object.assign(d.rows[h], p));
+    return buildLayout(d.rows, startHour);
+}
+const cellAt = (layout, cells, hour) => cells[layout.findIndex((it) => it.hour === hour)];
+
+test('빈 칸은 캘린더 일정 시간만큼 블록이 된다 (8~13시 → 8시부터 5칸)', () => {
+    const layout = dayLayout({});
+    const { byHour } = calendarForDay([timed('카카오 패밀리데이', at(2026, 11, 22, 8), at(2026, 11, 22, 13))], '2026-11-22', 6);
+    const cells = planColumn(layout, byHour);
+    const c8 = cellAt(layout, cells, 8);
+    assert.deepEqual([c8.kind, c8.span, c8.event.title], ['cal', 5, '카카오 패밀리데이']);
+    assert.equal(cellAt(layout, cells, 9).kind, 'skip');
+    assert.equal(cellAt(layout, cells, 13).kind, 'user');
+});
+
+test('사용자 PLAN 은 덮어쓰지 않는다 — 11/22 실제 상황(9~12시 패밀리데이 참석)', () => {
+    const layout = dayLayout({
+        9: { plan: '패밀리데이 참석' }, 10: { planMerge: true }, 11: { planMerge: true }, 12: { planMerge: true },
+    });
+    const { byHour } = calendarForDay([timed('카카오 패밀리데이', at(2026, 11, 22, 8), at(2026, 11, 22, 13))], '2026-11-22', 6);
+    const cells = planColumn(layout, byHour);
+    assert.deepEqual([cellAt(layout, cells, 8).kind, cellAt(layout, cells, 8).span], ['cal', 1]);
+    const c9 = cellAt(layout, cells, 9);
+    assert.deepEqual([c9.kind, c9.span, c9.chips.map((e) => e.title)], ['user', 4, ['카카오 패밀리데이']]);
+});
+
+test('일정이 사용자 PLAN 에 끊기면 뒤쪽 빈 칸에 다시 블록', () => {
+    const layout = dayLayout({ 9: { plan: '내 계획' } });
+    const { byHour } = calendarForDay([timed('긴 일정', at(2026, 11, 22, 8), at(2026, 11, 22, 11))], '2026-11-22', 6);
+    const cells = planColumn(layout, byHour);
+    assert.deepEqual([cellAt(layout, cells, 8).kind, cellAt(layout, cells, 8).span], ['cal', 1]);
+    assert.deepEqual([cellAt(layout, cells, 10).kind, cellAt(layout, cells, 10).span, cellAt(layout, cells, 10).event.continued], ['cal', 1, true]);
+});
+
+test('겹치는 일정: 먼저 시작한 일정이 블록, 나머지는 그 안에 작게', () => {
+    const layout = dayLayout({});
+    const { byHour } = calendarForDay([
+        timed('회의', at(2026, 11, 22, 14), at(2026, 11, 22, 16)),
+        timed('통화', at(2026, 11, 22, 15), at(2026, 11, 22, 15, 30)),
+    ], '2026-11-22', 6);
+    const cells = planColumn(layout, byHour);
+    const c14 = cellAt(layout, cells, 14);
+    assert.deepEqual([c14.kind, c14.span, c14.event.title, c14.chips.map((e) => e.title)], ['cal', 2, '회의', ['통화']]);
+});
+
+test('캘린더 일정이 없으면 사용자 칸 그대로', () => {
+    const layout = dayLayout({ 9: { plan: 'A' }, 10: { planMerge: true } });
+    const cells = planColumn(layout, {});
+    assert.equal(cells.filter((c) => c.kind === 'cal').length, 0);
+    assert.equal(cellAt(layout, cells, 9).span, 2);
+});

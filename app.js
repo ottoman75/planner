@@ -2,7 +2,7 @@ import {
     CATEGORY_IDS, FITNESS_SETS, PRIORITY_MAX, WEEKDAYS,
     emptyRow, emptyDay, toTemplate, displayHours, hourLabel, buildLayout, computeStats,
     toKey, parseKey, addDays, slotStart, planEvents, eventTitle, eventBody, dueAlerts, buildIcs, fitnessTotal,
-    migrateTimestamps, toSyncPayload, mergeStates, calendarForDay, eventsInSlot, clockLabel,
+    migrateTimestamps, toSyncPayload, mergeStates, calendarForDay, eventsInSlot, clockLabel, planColumn, calendarEventKey,
 } from './core.js';
 import { findGist, createGist, readGist, writeGist } from './sync.js';
 import { programDay, mondayOf } from './fitness-program.js';
@@ -237,18 +237,30 @@ function catCell(item) {
     return `<button class="cell-btn" style="padding:0" data-edit="${item.hour}">${inner}</button>`;
 }
 
-// PLAN 칸: 계획 글자 + 그 블록 시간에 시작하는 캘린더 일정
-function planCell(item, events) {
-    const text = `<span class="plan-text">${esc(item.plan)}</span>${calChipsHtml(events)}`;
-    if (item.planSpan > 1) {
+// PLAN 칸: 사용자 계획 + 그 시간과 겹치는 캘린더 일정(작게)
+function planCell(item, span, chips) {
+    // PLAN에 넣기로 옮긴 일정은 같은 제목이 두 번 보이지 않게
+    const extra = chips.filter((e) => e.title.trim() !== item.plan.trim());
+    const text = `<span class="plan-text">${esc(item.plan)}</span>${calChipsHtml(extra)}`;
+    if (span > 1) {
         return `<button class="cell-btn" style="padding:0" data-edit="${item.hour}"><span class="plan-block plan">${text}</span></button>`;
     }
     return `<button class="cell-btn plan" data-edit="${item.hour}">${text}</button>`;
 }
 
+// 비어 있는 PLAN 칸을 채운 캘린더 일정 블록 (저장되지 않는 표시)
+function calBlockCell(item, cell) {
+    const e = cell.event;
+    const time = `${e.continued ? '↳ ' : ''}${clockLabel(e.startMs)}–${clockLabel(e.endMs)}`;
+    return `<button class="cell-btn" style="padding:0" data-edit="${item.hour}" aria-label="캘린더 일정 ${esc(e.title)} ${time}">
+        <span class="plan-block cal-block"><span class="cal-block-time">📅 ${time}</span>
+        <span class="cal-block-title">${esc(e.title)}</span>${calChipsHtml(cell.chips)}</span></button>`;
+}
+
 function renderTable(layout) {
     const cal = calendarForDay(calendar?.events, currentKey, state.settings.startHour);
     renderAllDay(cal.allDay);
+    const planCells = planColumn(layout, cal.byHour);
     const html = layout.map((item, i) => {
         const cls = [item.setNo ? 'in-set' : '', isNowSlot(item.hour) ? 'now' : ''].join(' ').trim();
         const cells = [];
@@ -266,17 +278,11 @@ function renderTable(layout) {
         const pri = item.row.pri ? `<span class="pri p${item.row.pri}">${item.row.pri}</span>` : '';
         cells.push(`<td class="line"><button class="pri-btn" data-pri="${item.hour}" aria-label="우선순위 ${item.row.pri || '없음'}">${pri}</button></td>`);
         cells.push(`<td class="line"><button class="check-btn" data-check="${item.hour}" role="checkbox" aria-checked="${item.row.done}" aria-label="${hourLabel(item.hour)} 완료"><span class="check${item.row.done ? ' on' : ''}">${ICONS.check}</span></button></td>`);
-        if (item.planSpan > 0) {
-            // 합쳐진 PLAN 블록 안에서 같은 일정은 한 번만 (처음 나온 칸 기준)
-            const seen = new Set();
-            const events = layout.slice(i, i + item.planSpan).flatMap((it) => cal.byHour[it.hour] ?? [])
-                .filter((e) => {
-                    const key = `${e.uid}|${e.start}`;
-                    if (seen.has(key)) return false;
-                    seen.add(key);
-                    return true;
-                });
-            cells.push(`<td class="line" rowspan="${item.planSpan}">${planCell(item, events)}</td>`);
+        const planCellInfo = planCells[i];
+        if (planCellInfo.kind === 'cal') {
+            cells.push(`<td class="line" rowspan="${planCellInfo.span}">${calBlockCell(item, planCellInfo)}</td>`);
+        } else if (planCellInfo.kind === 'user') {
+            cells.push(`<td class="line" rowspan="${planCellInfo.span}">${planCell(item, planCellInfo.span, planCellInfo.chips)}</td>`);
         }
         return `<tr class="${cls}" data-hour="${item.hour}">${cells.join('')}</tr>`;
     }).join('');
@@ -513,6 +519,25 @@ function buildRowForm() {
         </div>`;
 }
 
+// 일정이 차지하던 빈 칸 블록이 있으면 그 칸들을 합쳐 PLAN 으로 저장, 아니면 이 칸(블록)의 PLAN 만
+function insertEventAsPlan(event) {
+    const rows = day().rows;
+    const layout = layoutOf();
+    const cells = planColumn(layout, calendarForDay(calendar?.events, currentKey, state.settings.startHour).byHour);
+    const index = layout.findIndex((it) => it.hour === sheetHour);
+    let head = index;
+    while (head > 0 && cells[head].kind === 'skip') head -= 1;
+    const cell = cells[head];
+    if (cell.kind === 'cal' && calendarEventKey(cell.event) === calendarEventKey(event)) {
+        layout.slice(head, head + cell.span).forEach((it, k) => {
+            rows[it.hour].plan = k === 0 ? event.title : '';
+            rows[it.hour].planMerge = k > 0;
+        });
+        return;
+    }
+    rows[layout[index].planHead].plan = event.title;
+}
+
 function slotEventsHtml(hour) {
     const events = eventsInSlot(calendar?.events, currentKey, hour, state.settings.startHour);
     if (!events.length) return '';
@@ -563,8 +588,7 @@ $('#rowForm').addEventListener('click', (e) => {
     const calBtn = e.target.closest('[data-cal-plan]');
     if (calBtn) {
         const event = eventsInSlot(calendar?.events, currentKey, sheetHour, state.settings.startHour)[Number(calBtn.dataset.calPlan)];
-        const item = layoutOf().find((it) => it.hour === sheetHour);
-        if (event && item) day().rows[item.planHead].plan = event.title;
+        if (event) insertEventAsPlan(event);
         save();
         renderBoard();
         buildRowForm();

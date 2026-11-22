@@ -349,3 +349,62 @@ export function clockLabel(ms) {
     const d = new Date(ms);
     return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
+
+export function calendarEventKey(e) {
+    return `${e.uid}|${e.start}`;
+}
+
+/**
+ * PLAN 열 구성 — 사용자 PLAN 은 그대로, 비어 있는 칸만 캘린더 일정 블록으로 채운다 (저장하지 않는 표시용)
+ * 반환: 표시 행마다
+ *  - { kind: 'user', span, chips }           사용자 PLAN 칸 (span 은 합치기 반영)
+ *  - { kind: 'cal', span, event, chips }      캘린더 일정 블록 (연속된 빈 칸을 합침)
+ *  - { kind: 'skip' }                         위 칸 블록에 덮인 행
+ * chips: 그 칸과 겹치지만 블록의 주인이 아닌 일정 (중복 제거)
+ * 일정이 겹치면 먼저 시작한(같으면 긴) 일정이 빈 칸을 차지한다
+ */
+export function planColumn(layout, byHour) {
+    const n = layout.length;
+    const free = layout.map((it) => it.planSpan === 1 && !it.plan.trim());
+    const found = new Map();
+    layout.forEach((it, i) => (byHour[it.hour] ?? []).forEach((e) => {
+        const key = calendarEventKey(e);
+        if (!found.has(key)) found.set(key, { key, first: e, rows: [] });
+        found.get(key).rows.push(i);
+    }));
+    const ordered = [...found.values()].sort((a, b) => (a.first.startMs - b.first.startMs)
+        || (b.first.endMs - b.first.startMs) - (a.first.endMs - a.first.startMs));
+
+    const owner = new Array(n).fill(null);
+    ordered.forEach(({ key, rows }) => rows.forEach((i) => {
+        if (free[i] && owner[i] === null) owner[i] = key;
+    }));
+
+    const chipsFor = (from, span, exceptKey) => {
+        const seen = new Set([exceptKey]);
+        return layout.slice(from, from + span).flatMap((it) => byHour[it.hour] ?? []).filter((e) => {
+            const key = calendarEventKey(e);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    };
+
+    const cells = new Array(n).fill(null).map(() => ({ kind: 'skip' }));
+    let i = 0;
+    while (i < n) {
+        if (owner[i]) {
+            let j = i;
+            while (j + 1 < n && owner[j + 1] === owner[i]) j += 1;
+            const span = j - i + 1;
+            const event = (byHour[layout[i].hour] ?? []).find((e) => calendarEventKey(e) === owner[i]);
+            cells[i] = { kind: 'cal', span, event, chips: chipsFor(i, span, owner[i]) };
+            i = j + 1;
+        } else {
+            const span = Math.max(layout[i].planSpan, 1);
+            cells[i] = { kind: 'user', span, chips: chipsFor(i, span, null) };
+            i += span;
+        }
+    }
+    return cells;
+}
