@@ -279,6 +279,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 }
 .cal-chip b { font-weight: 700; }
 .cal-chip.cont { opacity: 0.6; }
+.cal-mark { font-size: 0.85em; margin-right: 4px; }
 .cal-chip.more { color: var(--text-2); background: var(--chip); border-left-color: var(--text-3); }
 .plan-block { flex-direction: column; align-items: flex-start; justify-content: center; min-width: 0; }
 .cell-btn.plan { display: flex; flex-direction: column; justify-content: center; min-width: 0; }

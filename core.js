@@ -47,7 +47,8 @@ export function emptyDay(template) {
 
 // 행 → 템플릿으로 저장할 필드만 남긴다
 export function toTemplate(rows) {
-    return rows.map(({ done, ...rest }) => ({ ...rest }));
+    // 캘린더 자동 채움 표시(cal)는 그 날에만 의미가 있으므로 빼고 저장
+    return rows.map(({ done, cal, ...rest }) => ({ ...rest }));
 }
 
 export function displayHours(startHour) {
@@ -407,4 +408,82 @@ export function planColumn(layout, byHour) {
         }
     }
     return cells;
+}
+
+// ---- 캘린더 일정 → 시간표 자동 채움 (분류·ACTION·PLAN) ----
+// 자동으로 채운 행에는 row.cal = 일정 키를 남긴다. 표시가 남아 있는 행 = 사용자가 손대지 않은 행
+// - 일정이 바뀌거나 지워지면 표시된 행을 비우고 다시 채운다
+// - 블록 안 한 칸이라도 완료(✓)했거나 사용자가 고치면 표시를 지워 "사용자 기록"이 된다
+// - day.calDismissed 에 있는 일정(이 칸 비우기)은 다시 채우지 않는다
+
+export const CAL_FILL_OFF = 'off';
+
+// 캘린더 이름 → 기본 분류
+export function defaultCalendarCategory(name = '') {
+    return /회사|업무|work|office/i.test(name) ? 'ACTIVE' : 'LIFE';
+}
+
+function isFreeItem(item) {
+    return item.catSpan === 1 && item.actionSpan === 1 && item.planSpan === 1
+        && !item.row.cat && !item.row.action.trim() && !item.row.plan.trim() && !item.row.done && !item.row.pri;
+}
+
+/** 사용자가 블록을 고치면 그 일정으로 채운 행 전체를 사용자 것으로 */
+export function claimCalendarRows(rows, key) {
+    if (!key) return;
+    rows.forEach((r) => {
+        if (r.cal === key) delete r.cal;
+    });
+}
+
+/**
+ * day 를 제자리에서 고친다. 바뀌었으면 true
+ * categoryFor(event) → 분류 id, '' (분류 없이), 또는 CAL_FILL_OFF (채우지 않음)
+ */
+export function applyCalendarToDay(day, events, dayKey, startHour, categoryFor) {
+    const before = JSON.stringify(day.rows);
+    const rows = day.rows;
+    const dismissed = new Set(day.calDismissed ?? []);
+
+    // 1) 완료한 칸이 있는 블록은 사용자 기록으로 고정
+    new Set(rows.filter((r) => r.cal && r.done).map((r) => r.cal)).forEach((key) => claimCalendarRows(rows, key));
+    // 2) 아직 손대지 않은 자동 채움은 비우고 새로 채운다 (일정 변경·삭제 반영)
+    rows.forEach((r, h) => {
+        if (r.cal) rows[h] = emptyRow();
+    });
+
+    // 3) 빈 칸에 채우기 — 먼저 시작한(같으면 긴) 일정 우선
+    const { byHour } = calendarForDay(events, dayKey, startHour);
+    const layout = buildLayout(rows, startHour);
+    const found = new Map();
+    layout.forEach((it, i) => (byHour[it.hour] ?? []).forEach((e) => {
+        const key = calendarEventKey(e);
+        if (!found.has(key)) found.set(key, { key, event: e, idx: [] });
+        found.get(key).idx.push(i);
+    }));
+    const taken = new Set();
+    [...found.values()]
+        .sort((a, b) => (a.event.startMs - b.event.startMs)
+            || (b.event.endMs - b.event.startMs) - (a.event.endMs - a.event.startMs))
+        .forEach(({ key, event, idx }) => {
+            if (dismissed.has(key)) return;
+            const cat = categoryFor(event);
+            if (cat === CAL_FILL_OFF) return;
+            let prev = -2;
+            idx.forEach((i) => {
+                if (taken.has(i) || !isFreeItem(layout[i])) {
+                    prev = -2;
+                    return;
+                }
+                const row = rows[layout[i].hour];
+                const continues = prev === i - 1;
+                Object.assign(row, continues
+                    ? { catMerge: true, actMerge: true, planMerge: true, cal: key }
+                    : { cat, action: event.title, plan: event.title, cal: key });
+                taken.add(i);
+                prev = i;
+            });
+        });
+
+    return JSON.stringify(rows) !== before;
 }

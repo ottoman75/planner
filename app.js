@@ -3,6 +3,7 @@ import {
     emptyRow, emptyDay, toTemplate, displayHours, hourLabel, buildLayout, computeStats,
     toKey, parseKey, addDays, slotStart, planEvents, eventTitle, eventBody, dueAlerts, buildIcs, fitnessTotal,
     migrateTimestamps, toSyncPayload, mergeStates, calendarForDay, eventsInSlot, clockLabel, planColumn, calendarEventKey,
+    applyCalendarToDay, claimCalendarRows, defaultCalendarCategory, CAL_FILL_OFF,
 } from './core.js';
 import { findGist, createGist, readGist, writeGist } from './sync.js';
 import { programDay, mondayOf } from './fitness-program.js';
@@ -51,6 +52,7 @@ function defaultState() {
             startHour: DEFAULT_START_HOUR,
             notify: { enabled: false, lead: 0 },
             calendarUrls: [],
+            calendarCategories: {},
         },
         habits: habits.map((name, i) => ({ id: `h${i + 1}`, name })),
         exercises: exercises.map(([name, unit], i) => ({ id: `e${i + 1}`, name, unit })),
@@ -147,7 +149,18 @@ function renderHeader() {
     document.title = `${currentKey.replaceAll('-', '.')} · ${state.settings.title}`;
 }
 
+// 캘린더 일정 → 오늘 이후 날짜의 빈 칸에 분류·ACTION·PLAN 자동 채움 (지난 날은 기록이라 건드리지 않음)
+function calendarCategoryFor(event) {
+    return state.settings.calendarCategories?.[event.calendar] ?? defaultCalendarCategory(event.calendar);
+}
+
+function autoFillCalendar() {
+    if (!calendar?.events || currentKey < toKey(new Date())) return;
+    if (applyCalendarToDay(day(), calendar.events, currentKey, state.settings.startHour, calendarCategoryFor)) save();
+}
+
 function renderBoard() {
+    autoFillCalendar();
     const layout = layoutOf();
     renderSummary(computeStats(layout));
     renderTable(layout);
@@ -273,7 +286,9 @@ function renderTable(layout) {
         if (item.catSpan > 0) cells.push(`<td class="line" rowspan="${item.catSpan}">${catCell(item)}</td>`);
         if (item.actionSpan > 0) {
             const doneCls = item.actionDone && item.action ? ' done' : '';
-            cells.push(`<td class="line" rowspan="${item.actionSpan}"><button class="cell-btn action${doneCls}" data-edit="${item.hour}">${esc(item.action)}</button></td>`);
+            // 📅: 캘린더가 채웠고 아직 손대지 않은 블록 (일정이 바뀌면 따라 바뀜)
+            const calMark = item.row.cal ? '<span class="cal-mark" title="아이폰 캘린더에서 채움">📅</span>' : '';
+            cells.push(`<td class="line" rowspan="${item.actionSpan}"><button class="cell-btn action${doneCls}" data-edit="${item.hour}">${calMark}${esc(item.action)}</button></td>`);
         }
         const pri = item.row.pri ? `<span class="pri p${item.row.pri}">${item.row.pri}</span>` : '';
         cells.push(`<td class="line"><button class="pri-btn" data-pri="${item.hour}" aria-label="우선순위 ${item.row.pri || '없음'}">${pri}</button></td>`);
@@ -451,6 +466,7 @@ $('#ttBody').addEventListener('click', (e) => {
     if (pri) {
         const row = day().rows[Number(pri.dataset.pri)];
         row.pri = (row.pri + 1) % (PRIORITY_MAX + 1);
+        claimCalendarRows(day().rows, row.cal);
         save();
         renderBoard();
         return;
@@ -553,6 +569,8 @@ function applyRowForm() {
     const f = form.elements;
     const rows = day().rows;
     const row = rows[sheetHour];
+    // 자동 채운 일정 블록을 고치면 그 블록은 사용자 기록이 된다
+    claimCalendarRows(rows, row.cal);
     row.catMerge = f.catMerge.checked;
     row.actMerge = f.actMerge.checked;
     row.planMerge = f.planMerge.checked;
@@ -598,7 +616,19 @@ $('#rowForm').addEventListener('click', (e) => {
     if (!act) return;
     const rows = day().rows;
     if (act.dataset.act === 'done') rows[sheetHour].done = !rows[sheetHour].done;
-    if (act.dataset.act === 'clear') rows[sheetHour] = emptyRow();
+    if (act.dataset.act === 'clear') {
+        const key = rows[sheetHour].cal;
+        if (key) {
+            // 자동 채운 일정을 지우면 블록 전체를 비우고, 이 날에는 다시 채우지 않는다
+            const d = day();
+            d.calDismissed = [...new Set([...(d.calDismissed ?? []), key])];
+            rows.forEach((r, h) => {
+                if (r.cal === key) rows[h] = emptyRow();
+            });
+        } else {
+            rows[sheetHour] = emptyRow();
+        }
+    }
     save();
     renderBoard();
     buildRowForm();
@@ -1055,18 +1085,33 @@ function updateCalendarStatus() {
     if (err) err.textContent = calendar?.errors?.join(' / ') ?? '';
 }
 
+const CAL_CATEGORY_OPTIONS = [...CATEGORY_IDS.map((id) => [id, id]), ['', '분류 없이'], [CAL_FILL_OFF, '채우지 않기']];
+
+function calendarCategoryHtml() {
+    const names = (calendar?.calendars ?? []).map((c) => c.name);
+    if (!names.length) return '';
+    const rows = names.map((name) => {
+        const current = state.settings.calendarCategories?.[name] ?? defaultCalendarCategory(name);
+        const options = CAL_CATEGORY_OPTIONS.map(([value, label]) => `<option value="${value}"${value === current ? ' selected' : ''}>${label}</option>`).join('');
+        return `<label class="program-start">${esc(name)}<select name="calCat" data-cal-name="${esc(name)}">${options}</select></label>`;
+    }).join('');
+    return `<div class="program-box"><span class="label">캘린더별 분류</span>${rows}
+        <p class="hint">빈 칸에 일정을 채울 때 쓸 분류예요. 이미 채운 일정 중 손대지 않은 것도 바로 바뀌어요.</p></div>`;
+}
+
 function calendarSectionHtml() {
     const urls = (state.settings.calendarUrls ?? []).join('\n');
     return `
         <p class="section-title">📅 아이폰 캘린더 가져오기 <span class="status-pill" id="calStatus"></span></p>
-        <p class="hint">캘린더 일정을 시간표 PLAN 칸에 작게 보여줘요(30분마다 갱신, PLAN 내용은 바꾸지 않아요).
+        <p class="hint">30분마다 일정을 가져와 오늘 이후 날짜의 <b>빈 칸</b>에 분류·ACTION·PLAN 을 블록으로 채워요. 직접 적은 칸은 그대로 두고, 일정이 바뀌면 손대지 않은 블록도 따라 바뀌어요. ✓ 하거나 고친 블록은 내 기록으로 남아요.
         ${readSyncConfig() ? '' : '<br><b>위의 기기 간 동기화를 먼저 연결해야 해요.</b>'}<br>
         1. 아이폰 <b>캘린더</b> 앱 → 아래 <b>캘린더</b> → 가져올 캘린더의 ⓘ → <b>공개 캘린더</b> 켜기 → <b>링크 공유 → 복사</b><br>
         2. 아래 칸에 붙여넣기 (여러 개면 한 줄에 하나)<br>
         ⚠️ 공개 캘린더는 링크를 아는 사람이면 볼 수 있어요. 링크를 다른 곳에 올리지 마세요.
         <span id="calErrors" style="color:#d0453a;display:block"></span></p>
         <div class="field"><textarea name="calendarUrls" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false"
-            placeholder="webcal://p00-caldav.icloud.com/published/2/..." aria-label="캘린더 공유 링크">${esc(urls)}</textarea></div>`;
+            placeholder="webcal://p00-caldav.icloud.com/published/2/..." aria-label="캘린더 공유 링크">${esc(urls)}</textarea></div>
+        ${calendarCategoryHtml()}`;
 }
 
 // ---------- 설정 시트 ----------
@@ -1158,6 +1203,11 @@ $('#settingsForm').addEventListener('change', (e) => {
         save('meta');
         updateCalendarStatus();
         toast(state.settings.calendarUrls.length ? '캘린더 링크를 저장했어요. 30분 안에 일정이 들어와요' : '캘린더 가져오기를 껐어요');
+        return;
+    } else if (t.name === 'calCat') {
+        state.settings.calendarCategories = { ...state.settings.calendarCategories, [t.dataset.calName]: t.value };
+        save('meta');
+        renderBoard();
         return;
     } else if (t.name === 'startHour') {
         state.settings.startHour = Number(t.value);

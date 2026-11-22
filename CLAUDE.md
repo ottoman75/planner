@@ -27,6 +27,7 @@
 - 공개 저장소다. 개인 기록·실데이터를 코드나 테스트에 넣지 않는다. Actions 로그도 공개 — 캘린더 링크·일정 제목을 출력하지 말 것
 - 캘린더 수집 로컬 검증: 목 Gist 서버 + `GITHUB_API_URL=http://localhost:8787 PLANNER_GIST_TOKEN=test-token node scripts/fetch-calendar.mjs`
 - 캘린더 일정(`planner.calendar`)은 읽기 전용 사본. 동기화로 올리거나 백업 파일에 넣지 않는다
+- 캘린더 자동 채움 행은 `row.cal` 로 구분. 사용자가 행을 바꾸는 새 경로를 만들면 `claimCalendarRows` 를 불러야 자동 채움이 사용자 입력을 지우지 않는다
 
 ## 알려진 제약
 - 캘린더 반영은 최대 30분(+GitHub 예약 실행 지연) 늦다. iCloud 공개 캘린더만 지원
